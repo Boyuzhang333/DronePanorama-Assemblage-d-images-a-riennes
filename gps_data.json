@@ -1,0 +1,34 @@
+{
+    "image_000.jpg": {
+        "latitude": 43.55,
+        "longitude": 7.0167
+    },
+    "image_001.jpg": {
+        "latitude": 43.55,
+        "longitude": 7.0407
+    },
+    "image_002.jpg": {
+        "latitude": 43.55,
+        "longitude": 7.0647
+    },
+    "image_003.jpg": {
+        "latitude": 43.55,
+        "longitude": 7.0887
+    },
+    "image_004.jpg": {
+        "latitude": 43.568,
+        "longitude": 7.0167
+    },
+    "image_005.jpg": {
+        "latitude": 43.568,
+        "longitude": 7.0407
+    },
+    "image_006.jpg": {
+        "latitude": 43.568,
+        "longitude": 7.0647
+    },
+    "image_007.jpg": {
+        "latitude": 43.568,
+        "longitude": 7.0887
+    }
+}
