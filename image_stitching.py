@@ -4,20 +4,51 @@ import os
 from typing import List, Tuple, Optional
 
 class ImageStitcher:
-    def __init__(self):
-        # 初始化SIFT特征检测器
+    def __init__(self, detector_type='sift'):
+        """
+        初始化图像拼接器
+        detector_type: 特征检测器类型 ('sift', 'orb', 'akaze')
+        """
+        self.detector_type = detector_type.lower()
+        
+        # 初始化SIFT检测器（保持当前参数不变）
         self.sift = cv2.SIFT_create(
-            nfeatures=10000,  # 增加特征点数量
+            nfeatures=10000,
             nOctaveLayers=5,
             contrastThreshold=0.04,
             edgeThreshold=10,
             sigma=1.6
         )
-        # 初始化FLANN匹配器
+        
+        # 初始化ORB检测器
+        self.orb = cv2.ORB_create(
+            nfeatures=10000,
+            scaleFactor=1.1,
+            nlevels=12,
+            edgeThreshold=10,
+            firstLevel=0,
+            WTA_K=3,
+            patchSize=41,
+            fastThreshold=20
+        )
+        
+        # 初始化AKAZE检测器
+        self.akaze = cv2.AKAZE_create(
+            descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB,
+            descriptor_size=0,
+            descriptor_channels=3,
+            threshold=0.0008,
+            nOctaves=5,
+            nOctaveLayers=5,
+            diffusivity=cv2.KAZE_DIFF_PM_G2
+        )
+        
+        # 初始化匹配器
         FLANN_INDEX_KDTREE = 1
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
         search_params = dict(checks=50)
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     def load_images(self, image_folder: str) -> List[np.ndarray]:
         """加载文件夹中的所有图片"""
@@ -60,24 +91,43 @@ class ImageStitcher:
     def find_and_match_features(self, img1: np.ndarray, img2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List]:
         """查找和匹配两张图片之间的特征点"""
         # 检测特征点和描述符
-        kp1, des1 = self.sift.detectAndCompute(img1, None)
-        kp2, des2 = self.sift.detectAndCompute(img2, None)
-        
-        if des1 is None or des2 is None:
-            return None, None, []
+        if self.detector_type == 'sift':
+            kp1, des1 = self.sift.detectAndCompute(img1, None)
+            kp2, des2 = self.sift.detectAndCompute(img2, None)
+            if des1 is None or des2 is None:
+                return None, None, []
+            matches = self.flann.knnMatch(des1, des2, k=2)
+            good_matches = []
+            for m, n in matches:
+                if m.distance < 0.7 * n.distance:
+                    good_matches.append(m)
+            print(f"SIFT检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
+            print(f"SIFT匹配点数量: {len(good_matches)}")
+            
+        elif self.detector_type == 'orb':
+            kp1, des1 = self.orb.detectAndCompute(img1, None)
+            kp2, des2 = self.orb.detectAndCompute(img2, None)
+            if des1 is None or des2 is None:
+                return None, None, []
+            matches = self.bf.match(des1, des2)
+            matches = sorted(matches, key=lambda x: x.distance)
+            good_matches = matches[:1000]
+            print(f"ORB检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
+            print(f"ORB匹配点数量: {len(good_matches)}")
+            
+        else:  # akaze
+            kp1, des1 = self.akaze.detectAndCompute(img1, None)
+            kp2, des2 = self.akaze.detectAndCompute(img2, None)
+            if des1 is None or des2 is None:
+                return None, None, []
+            matches = self.bf.match(des1, des2)
+            matches = sorted(matches, key=lambda x: x.distance)
+            good_matches = matches[:1000]
+            print(f"AKAZE检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
+            print(f"AKAZE匹配点数量: {len(good_matches)}")
 
-        # 使用FLANN进行特征匹配
-        matches = self.flann.knnMatch(des1, des2, k=2)
-        
-        # 应用Lowe's ratio测试
-        good_matches = []
-        for m, n in matches:
-            if m.distance < 0.7 * n.distance:
-                good_matches.append(m)
-
-        print(f"Found {len(good_matches)} good matches")
-        
         if len(good_matches) < 10:
+            print("匹配点数量不足")
             return None, None, []
 
         # 获取匹配点的坐标
@@ -240,28 +290,37 @@ class ImageStitcher:
         return result
 
 def main():
-    # 创建 ImageStitcher 实例
-    stitcher = ImageStitcher()
-    
+    """主函数"""
     # 加载图片
-    image_folder = "images"  # 替换为你的图片文件夹路径
-    images = stitcher.load_images(image_folder)
+    image_folder = "images"
+    print(f"\n从 {image_folder} 文件夹加载图片...")
     
-    if not images:
-        print("No images found in the specified folder")
+    if not os.path.exists(image_folder):
+        print(f"错误：找不到 {image_folder} 文件夹")
         return
-    
-    print(f"Loaded {len(images)} images")
-    
-    # 拼接图片
-    result = stitcher.stitch_images(images)
-    
-    if result is not None:
-        # 保存结果
-        cv2.imwrite("stitched_result.jpg", result)
-        print("Stitching completed and saved as 'stitched_result.jpg'")
-    else:
-        print("Failed to stitch images")
+        
+    # 分别使用三种检测器进行拼接
+    detectors = ['sift', 'orb', 'akaze']
+    for detector in detectors:
+        print(f"\n使用 {detector.upper()} 检测器进行拼接...")
+        stitcher = ImageStitcher(detector_type=detector)
+        
+        images = stitcher.load_images(image_folder)
+        if not images:
+            print("错误：没有找到有效的图片文件")
+            continue
+            
+        print(f"\n成功加载 {len(images)} 张图片")
+        
+        # 开始拼接
+        result = stitcher.stitch_images(images)
+        
+        if result is not None:
+            print(f"\n保存 {detector.upper()} 结果...")
+            cv2.imwrite(f'stitched_result_{detector}.jpg', result)
+            print(f"已保存结果到 stitched_result_{detector}.jpg")
+        else:
+            print(f"\n{detector.upper()} 拼接失败，无法生成结果")
 
 if __name__ == "__main__":
     main() 
