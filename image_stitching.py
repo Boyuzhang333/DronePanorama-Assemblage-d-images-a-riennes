@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import os
+from pathlib import Path
 from typing import List, Tuple, Optional
+import re
 
 class ImageStitcher:
     def __init__(self, detector_type='sift'):
@@ -11,7 +13,7 @@ class ImageStitcher:
         """
         self.detector_type = detector_type.lower()
         
-        # 初始化SIFT检测器（保持当前参数不变）
+        # 初始化SIFT检测器
         self.sift = cv2.SIFT_create(
             nfeatures=10000,
             nOctaveLayers=5,
@@ -51,16 +53,28 @@ class ImageStitcher:
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     def load_images(self, image_folder: str) -> List[np.ndarray]:
-        """加载文件夹中的所有图片"""
+        """从指定文件夹加载所有图片"""
         images = []
-        for filename in os.listdir(image_folder):
+        image_paths = []
+        
+        # 确保文件夹存在
+        if not os.path.exists(image_folder):
+            print(f"错误：找不到文件夹 {image_folder}")
+            return images, image_paths
+            
+        # 获取所有图片文件
+        for filename in sorted(os.listdir(image_folder)):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 img_path = os.path.join(image_folder, filename)
                 img = cv2.imread(img_path)
                 if img is not None:
-                    print(f"Loaded image: {filename}")
+                    print(f"已加载图片: {filename}")
                     images.append(img)
-        return images
+                    image_paths.append(img_path)
+                else:
+                    print(f"警告：无法加载图片 {filename}")
+                    
+        return images, image_paths
 
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """图像预处理：增强对比度和细节"""
@@ -267,58 +281,103 @@ class ImageStitcher:
         
         # 逐个拼接后续图片
         for i in range(1, len(images)):
-            print(f"\nProcessing image pair {i}/{len(images)-1}")
+            print(f"\n处理图片对 {i}/{len(images)-1}")
             
             # 查找和匹配特征点
             src_pts, dst_pts, matches = self.find_and_match_features(result, images[i])
             
             if src_pts is None or len(matches) < 10:
-                print(f"Not enough matches found for image {i}, skipping...")
+                print(f"图片 {i} 匹配点不足，跳过...")
                 continue
             
             # 计算单应性矩阵
             H = self.compute_homography(src_pts, dst_pts)
             
             if H is None:
-                print(f"Could not compute homography for image {i}, skipping...")
+                print(f"无法计算图片 {i} 的单应性矩阵，跳过...")
                 continue
             
             # 创建全景图
             result = self.create_panorama(result, images[i], H)
-            print(f"Successfully stitched image {i}")
+            print(f"成功拼接图片 {i}")
         
         return result
 
+def get_test_number(input_path):
+    """从输入路径中提取测试序号"""
+    # 从路径中提取 'imageTestX' 中的 X
+    match = re.search(r'imageTest(\d+)', input_path)
+    if match:
+        return match.group(1)
+    return "1"  # 默认返回1
+
+def select_detector():
+    """让用户选择特征检测器"""
+    print("\n可用的特征检测器：")
+    print("1. SIFT (尺度不变特征变换)")
+    print("2. ORB (定向FAST和旋转BRIEF)")
+    print("3. AKAZE (加速KAZE)")
+    print("4. 全部都试一下")
+    
+    while True:
+        choice = input("\n请选择特征检测器 (1-4): ").strip()
+        if choice == '1':
+            return ['sift']
+        elif choice == '2':
+            return ['orb']
+        elif choice == '3':
+            return ['akaze']
+        elif choice == '4':
+            return ['sift', 'orb', 'akaze']
+        else:
+            print("无效的选择，请重试")
+
 def main():
     """主函数"""
-    # 加载图片
-    image_folder = "images"
-    print(f"\n从 {image_folder} 文件夹加载图片...")
-    
-    if not os.path.exists(image_folder):
-        print(f"错误：找不到 {image_folder} 文件夹")
+    # 获取用户输入的路径
+    input_folder = input("请输入子图片所在文件夹路径（例如：images/imageTest1）: ").strip()
+    if not os.path.exists(input_folder):
+        print(f"错误：找不到文件夹 {input_folder}")
         return
         
-    # 分别使用三种检测器进行拼接
-    detectors = ['sift', 'orb', 'akaze']
+    # 根据输入路径生成输出路径
+    test_number = get_test_number(input_folder)
+    output_folder = f"imageResultat{test_number}"
+    
+    # 确保输出文件夹存在
+    Path(output_folder).mkdir(exist_ok=True)
+    
+    print(f"\n输入文件夹: {input_folder}")
+    print(f"输出文件夹: {output_folder}")
+    
+    # 让用户选择特征检测器
+    detectors = select_detector()
+    
+    # 使用选定的检测器进行拼接
     for detector in detectors:
         print(f"\n使用 {detector.upper()} 检测器进行拼接...")
         stitcher = ImageStitcher(detector_type=detector)
         
-        images = stitcher.load_images(image_folder)
+        # 加载图片
+        images, image_paths = stitcher.load_images(input_folder)
         if not images:
             print("错误：没有找到有效的图片文件")
             continue
             
-        print(f"\n成功加载 {len(images)} 张图片")
+        print(f"\n成功加载 {len(images)} 张子图片")
+        print("图片加载顺序：")
+        for path in image_paths:
+            print(f"  - {os.path.basename(path)}")
         
         # 开始拼接
         result = stitcher.stitch_images(images)
         
         if result is not None:
-            print(f"\n保存 {detector.upper()} 结果...")
-            cv2.imwrite(f'stitched_result_{detector}.jpg', result)
-            print(f"已保存结果到 stitched_result_{detector}.jpg")
+            # 生成输出文件名
+            output_path = os.path.join(output_folder, f'stitched_result_{detector}.jpg')
+            print(f"\n保存 {detector.upper()} 结果到 {output_path}...")
+            cv2.imwrite(output_path, result)
+            print("保存完成")
         else:
             print(f"\n{detector.upper()} 拼接失败，无法生成结果")
 
