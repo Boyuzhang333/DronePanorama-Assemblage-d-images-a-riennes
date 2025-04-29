@@ -13,7 +13,7 @@ def find_next_test_dir(base_path="images"):
 
 def split_image(image_path, overlap_ratio=0.6):
     """
-    将图片分解成多个重叠的子图片
+    将图片分解成多个重叠的子图片，避免重复
     
     Args:
         image_path: 输入图片路径
@@ -36,11 +36,10 @@ def split_image(image_path, overlap_ratio=0.6):
     print(f"原始图片尺寸: {width}x{height}")
     
     # 计算子图片的大小
-    # 为了保持指定的重叠比例，我们选择图片宽度的40%作为子图片的宽度
-    sub_width = int(width * 0.4)
-    sub_height = int(height * 0.4)
+    sub_width = int(width * 0.4)  # 子图片宽度为原图的40%
+    sub_height = int(height * 0.4)  # 子图片高度为原图的40%
     
-    # 计算步长（重叠部分）
+    # 计算步长（非重叠部分）
     step_x = int(sub_width * (1 - overlap_ratio))
     step_y = int(sub_height * (1 - overlap_ratio))
     
@@ -50,8 +49,18 @@ def split_image(image_path, overlap_ratio=0.6):
     
     # 生成子图片
     count = 0
-    for y in range(0, height - sub_height + 1, step_y):
-        for x in range(0, width - sub_width + 1, step_x):
+    y = 0
+    while y < height:
+        x = 0
+        while x < width:
+            # 如果这是最后一列，调整x的位置以确保完整覆盖
+            if x + sub_width > width:
+                x = width - sub_width
+            
+            # 如果这是最后一行，调整y的位置以确保完整覆盖
+            if y + sub_height > height:
+                y = height - sub_height
+            
             # 提取子图片
             sub_img = img[y:y + sub_height, x:x + sub_width]
             
@@ -60,6 +69,18 @@ def split_image(image_path, overlap_ratio=0.6):
             cv2.imwrite(output_path, sub_img)
             print(f"已保存: {output_path} (位置: [{x}:{x+sub_width}, {y}:{y+sub_height}])")
             count += 1
+            
+            # 如果已经处理到最后一列，跳出内循环
+            if x == width - sub_width:
+                break
+            
+            x += step_x
+        
+        # 如果已经处理到最后一行，跳出外循环
+        if y == height - sub_height:
+            break
+        
+        y += step_y
     
     print(f"\n总共生成了 {count} 个子图片")
     return output_dir, count
