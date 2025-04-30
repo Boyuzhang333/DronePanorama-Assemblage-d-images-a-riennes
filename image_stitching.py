@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Optional
 import re
+import gc
 
 class ImageStitcher:
     def __init__(self, detector_type='sift'):
@@ -68,7 +69,13 @@ class ImageStitcher:
                 img_path = os.path.join(image_folder, filename)
                 img = cv2.imread(img_path)
                 if img is not None:
-                    print(f"已加载图片: {filename}")
+                    # 获取原始尺寸
+                    h, w = img.shape[:2]
+                    # 压缩到原来的一半大小
+                    new_w = w // 2
+                    new_h = h // 2
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    print(f"已压缩图片: {filename} ({w}x{h} -> {new_w}x{new_h})")
                     images.append(img)
                     image_paths.append(img_path)
                 else:
@@ -103,40 +110,112 @@ class ImageStitcher:
         return enhanced
 
     def find_and_match_features(self, img1: np.ndarray, img2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List]:
-        """查找和匹配两张图片之间的特征点"""
+        """查找和匹配两张图片之间的特征点，优先使用稳定区域的特征"""
+        
+        # 创建海面mask
+        def create_water_mask(img):
+            # 转换到HSV空间
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            
+            # 提取饱和度通道
+            sat = hsv[:, :, 1]
+            
+            # 使用自适应阈值分割
+            mean_sat = np.mean(sat)
+            water_mask = sat < (mean_sat * 1.2)  # 水面通常饱和度较低
+            
+            # 形态学操作改善mask
+            kernel = np.ones((5,5), np.uint8)
+            water_mask = cv2.morphologyEx(water_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+            
+            return water_mask
+
         # 检测特征点和描述符
         if self.detector_type == 'sift':
-            kp1, des1 = self.sift.detectAndCompute(img1, None)
-            kp2, des2 = self.sift.detectAndCompute(img2, None)
+            # 获取两张图片的水面mask
+            mask1 = create_water_mask(img1)
+            mask2 = create_water_mask(img2)
+            
+            # 在非水面区域检测特征点
+            kp1, des1 = self.sift.detectAndCompute(img1, 1 - mask1)
+            kp2, des2 = self.sift.detectAndCompute(img2, 1 - mask2)
+            
             if des1 is None or des2 is None:
                 return None, None, []
+            
+            # 特征点匹配
             matches = self.flann.knnMatch(des1, des2, k=2)
             good_matches = []
+            
             for m, n in matches:
-                if m.distance < 0.7 * n.distance:
-                    good_matches.append(m)
+                # 增加匹配条件的严格程度
+                if m.distance < 0.6 * n.distance:  # 原来是0.7，现在更严格
+                    # 检查特征点是否在水面上
+                    pt1 = kp1[m.queryIdx].pt
+                    pt2 = kp2[m.trainIdx].pt
+                    y1, x1 = int(pt1[1]), int(pt1[0])
+                    y2, x2 = int(pt2[1]), int(pt2[0])
+                    
+                    # 如果两个特征点都不在水面上，才接受这个匹配
+                    if not (mask1[y1, x1] or mask2[y2, x2]):
+                        good_matches.append(m)
+            
             print(f"SIFT检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"SIFT匹配点数量: {len(good_matches)}")
             
         elif self.detector_type == 'orb':
-            kp1, des1 = self.orb.detectAndCompute(img1, None)
-            kp2, des2 = self.orb.detectAndCompute(img2, None)
+            # ORB检测器的处理类似
+            mask1 = create_water_mask(img1)
+            mask2 = create_water_mask(img2)
+            
+            kp1, des1 = self.orb.detectAndCompute(img1, 1 - mask1)
+            kp2, des2 = self.orb.detectAndCompute(img2, 1 - mask2)
+            
             if des1 is None or des2 is None:
                 return None, None, []
+            
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = matches[:1000]
+            
+            # 过滤水面上的特征点
+            good_matches = []
+            for m in matches[:500]:
+                pt1 = kp1[m.queryIdx].pt
+                pt2 = kp2[m.trainIdx].pt
+                y1, x1 = int(pt1[1]), int(pt1[0])
+                y2, x2 = int(pt2[1]), int(pt2[0])
+                
+                if not (mask1[y1, x1] or mask2[y2, x2]):
+                    good_matches.append(m)
+            
             print(f"ORB检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"ORB匹配点数量: {len(good_matches)}")
             
         else:  # akaze
-            kp1, des1 = self.akaze.detectAndCompute(img1, None)
-            kp2, des2 = self.akaze.detectAndCompute(img2, None)
+            # AKAZE检测器的处理类似
+            mask1 = create_water_mask(img1)
+            mask2 = create_water_mask(img2)
+            
+            kp1, des1 = self.akaze.detectAndCompute(img1, 1 - mask1)
+            kp2, des2 = self.akaze.detectAndCompute(img2, 1 - mask2)
+            
             if des1 is None or des2 is None:
                 return None, None, []
+            
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = matches[:1000]
+            
+            # 过滤水面上的特征点
+            good_matches = []
+            for m in matches[:500]:
+                pt1 = kp1[m.queryIdx].pt
+                pt2 = kp2[m.trainIdx].pt
+                y1, x1 = int(pt1[1]), int(pt1[0])
+                y2, x2 = int(pt2[1]), int(pt2[0])
+                
+                if not (mask1[y1, x1] or mask2[y2, x2]):
+                    good_matches.append(m)
+            
             print(f"AKAZE检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"AKAZE匹配点数量: {len(good_matches)}")
 
@@ -332,6 +411,53 @@ def select_detector():
         else:
             print("无效的选择，请重试")
 
+def process_black_borders(image: np.ndarray, method='crop') -> np.ndarray:
+    """
+    处理图像中的黑色边框
+    
+    Args:
+        image: 输入图像
+        method: 处理方法，'crop'表示裁剪，'scale'表示缩放填充
+    """
+    # 转换为灰度图
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # 找到非黑色区域
+    _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+    
+    # 找到非零区域的边界框
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return image
+    
+    # 获取最大轮廓
+    max_contour = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(max_contour)
+    
+    if method == 'crop':
+        # 直接裁剪
+        return image[y:y+h, x:x+w]
+    else:  # method == 'scale'
+        # 先裁剪有效区域
+        cropped = image[y:y+h, x:x+w]
+        # 计算原始图片尺寸
+        orig_h, orig_w = image.shape[:2]
+        # 计算缩放比例
+        scale_w = orig_w / w
+        scale_h = orig_h / h
+        scale = max(scale_w, scale_h)
+        # 计算新尺寸
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        # 缩放图片
+        result = cv2.resize(cropped, (new_w, new_h))
+        # 如果缩放后的图片大于原始尺寸，裁剪到原始尺寸
+        if new_w > orig_w or new_h > orig_h:
+            start_x = (new_w - orig_w) // 2 if new_w > orig_w else 0
+            start_y = (new_h - orig_h) // 2 if new_h > orig_h else 0
+            result = result[start_y:start_y+orig_h, start_x:start_x+orig_w]
+        return result
+
 def main():
     """主函数"""
     # 获取用户输入的路径
@@ -353,6 +479,23 @@ def main():
     # 让用户选择特征检测器
     detectors = select_detector()
     
+    # 让用户选择黑边处理方式
+    print("\n请选择黑边处理方式：")
+    print("1. 直接裁剪黑边")
+    print("2. 缩放填充")
+    print("3. 保持原样不处理")
+    while True:
+        border_choice = input("请选择处理方式 (1-3): ").strip()
+        if border_choice in ['1', '2', '3']:
+            break
+        print("无效的选择，请重试")
+    
+    border_method = None
+    if border_choice == '1':
+        border_method = 'crop'
+    elif border_choice == '2':
+        border_method = 'scale'
+    
     # 使用选定的检测器进行拼接
     for detector in detectors:
         print(f"\n使用 {detector.upper()} 检测器进行拼接...")
@@ -373,6 +516,11 @@ def main():
         result = stitcher.stitch_images(images)
         
         if result is not None:
+            # 处理黑边
+            if border_method:
+                print(f"\n正在处理黑边...")
+                result = process_black_borders(result, border_method)
+            
             # 生成输出文件名
             output_path = os.path.join(output_folder, f'stitched_result_{detector}.jpg')
             print(f"\n保存 {detector.upper()} 结果到 {output_path}...")
