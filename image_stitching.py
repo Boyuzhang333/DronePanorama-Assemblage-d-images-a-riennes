@@ -56,7 +56,7 @@ class ImageStitcher:
     def load_images(self, image_folder: str) -> List[np.ndarray]:
         """从指定文件夹加载所有图片"""
         images = []
-        image_paths = []
+        image_paths = []  # 保持返回两个值
         
         # 确保文件夹存在
         if not os.path.exists(image_folder):
@@ -69,13 +69,7 @@ class ImageStitcher:
                 img_path = os.path.join(image_folder, filename)
                 img = cv2.imread(img_path)
                 if img is not None:
-                    # 获取原始尺寸
-                    h, w = img.shape[:2]
-                    # 压缩到原来的一半大小
-                    new_w = w // 2
-                    new_h = h // 2
-                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                    print(f"已压缩图片: {filename} ({w}x{h} -> {new_w}x{new_h})")
+                    print(f"已加载图片: {filename}")
                     images.append(img)
                     image_paths.append(img_path)
                 else:
@@ -110,66 +104,29 @@ class ImageStitcher:
         return enhanced
 
     def find_and_match_features(self, img1: np.ndarray, img2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List]:
-        """查找和匹配两张图片之间的特征点，优先使用稳定区域的特征"""
+        """查找和匹配两张图片之间的特征点"""
         
-        # 创建海面mask
-        def create_water_mask(img):
-            # 转换到HSV空间
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            
-            # 提取饱和度通道
-            sat = hsv[:, :, 1]
-            
-            # 使用自适应阈值分割
-            mean_sat = np.mean(sat)
-            water_mask = sat < (mean_sat * 1.2)  # 水面通常饱和度较低
-            
-            # 形态学操作改善mask
-            kernel = np.ones((5,5), np.uint8)
-            water_mask = cv2.morphologyEx(water_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-            
-            return water_mask
-
         # 检测特征点和描述符
         if self.detector_type == 'sift':
-            # 获取两张图片的水面mask
-            mask1 = create_water_mask(img1)
-            mask2 = create_water_mask(img2)
-            
-            # 在非水面区域检测特征点
-            kp1, des1 = self.sift.detectAndCompute(img1, 1 - mask1)
-            kp2, des2 = self.sift.detectAndCompute(img2, 1 - mask2)
+            kp1, des1 = self.sift.detectAndCompute(img1, None)
+            kp2, des2 = self.sift.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
                 return None, None, []
             
-            # 特征点匹配
             matches = self.flann.knnMatch(des1, des2, k=2)
             good_matches = []
             
             for m, n in matches:
-                # 增加匹配条件的严格程度
-                if m.distance < 0.6 * n.distance:  # 原来是0.7，现在更严格
-                    # 检查特征点是否在水面上
-                    pt1 = kp1[m.queryIdx].pt
-                    pt2 = kp2[m.trainIdx].pt
-                    y1, x1 = int(pt1[1]), int(pt1[0])
-                    y2, x2 = int(pt2[1]), int(pt2[0])
-                    
-                    # 如果两个特征点都不在水面上，才接受这个匹配
-                    if not (mask1[y1, x1] or mask2[y2, x2]):
-                        good_matches.append(m)
+                if m.distance < 0.7 * n.distance:
+                    good_matches.append(m)
             
             print(f"SIFT检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"SIFT匹配点数量: {len(good_matches)}")
             
         elif self.detector_type == 'orb':
-            # ORB检测器的处理类似
-            mask1 = create_water_mask(img1)
-            mask2 = create_water_mask(img2)
-            
-            kp1, des1 = self.orb.detectAndCompute(img1, 1 - mask1)
-            kp2, des2 = self.orb.detectAndCompute(img2, 1 - mask2)
+            kp1, des1 = self.orb.detectAndCompute(img1, None)
+            kp2, des2 = self.orb.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
                 return None, None, []
@@ -177,27 +134,13 @@ class ImageStitcher:
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
             
-            # 过滤水面上的特征点
-            good_matches = []
-            for m in matches[:500]:
-                pt1 = kp1[m.queryIdx].pt
-                pt2 = kp2[m.trainIdx].pt
-                y1, x1 = int(pt1[1]), int(pt1[0])
-                y2, x2 = int(pt2[1]), int(pt2[0])
-                
-                if not (mask1[y1, x1] or mask2[y2, x2]):
-                    good_matches.append(m)
-            
+            good_matches = matches[:1000]
             print(f"ORB检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"ORB匹配点数量: {len(good_matches)}")
             
         else:  # akaze
-            # AKAZE检测器的处理类似
-            mask1 = create_water_mask(img1)
-            mask2 = create_water_mask(img2)
-            
-            kp1, des1 = self.akaze.detectAndCompute(img1, 1 - mask1)
-            kp2, des2 = self.akaze.detectAndCompute(img2, 1 - mask2)
+            kp1, des1 = self.akaze.detectAndCompute(img1, None)
+            kp2, des2 = self.akaze.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
                 return None, None, []
@@ -205,17 +148,7 @@ class ImageStitcher:
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
             
-            # 过滤水面上的特征点
-            good_matches = []
-            for m in matches[:500]:
-                pt1 = kp1[m.queryIdx].pt
-                pt2 = kp2[m.trainIdx].pt
-                y1, x1 = int(pt1[1]), int(pt1[0])
-                y2, x2 = int(pt2[1]), int(pt2[0])
-                
-                if not (mask1[y1, x1] or mask2[y2, x2]):
-                    good_matches.append(m)
-            
+            good_matches = matches[:1000]
             print(f"AKAZE检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"AKAZE匹配点数量: {len(good_matches)}")
 
