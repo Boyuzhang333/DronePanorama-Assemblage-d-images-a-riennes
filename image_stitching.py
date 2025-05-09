@@ -227,18 +227,18 @@ class ImageStitcher:
         corners = np.float32([[0,0], [0,h1], [w1,h1], [w1,0]]).reshape(-1,1,2)
         corners_transformed = cv2.perspectiveTransform(corners, H)
         
-        # 计算输出图像的尺寸
-        xmin = min(corners_transformed[:,:,0].min(), 0)
-        ymin = min(corners_transformed[:,:,1].min(), 0)
-        xmax = max(corners_transformed[:,:,0].max(), w2)
-        ymax = max(corners_transformed[:,:,1].max(), h2)
+        # 计算输出图像的尺寸，确保包含所有图像区域，并增加30%的边距
+        xmin = int(min(corners_transformed[:,:,0].min(), 0) * 1.3)
+        ymin = int(min(corners_transformed[:,:,1].min(), 0) * 1.3)
+        xmax = int(max(corners_transformed[:,:,0].max(), w2) * 1.3)
+        ymax = int(max(corners_transformed[:,:,1].max(), h2) * 1.3)
         
-        # 调整变换矩阵以消除黑边
+        # 调整变换矩阵
         offset = [-xmin, -ymin]
         H_adjusted = np.array([[1,0,offset[0]], [0,1,offset[1]], [0,0,1]]) @ H
         
         # 创建输出图像
-        output_size = (int(xmax-xmin), int(ymax-ymin))
+        output_size = (xmax-xmin, ymax-ymin)
         result = cv2.warpPerspective(img1, H_adjusted, output_size)
         
         # 将第二张图片复制到结果中
@@ -247,18 +247,18 @@ class ImageStitcher:
         y_end = min(y_offset + h2, result.shape[0])
         x_end = min(x_offset + w2, result.shape[1])
         
-        # 创建简单的alpha混合区域
-        overlap_width = 100  # 重叠区域宽度
         for y in range(y_offset, y_end):
             for x in range(x_offset, x_end):
-                if x - x_offset < overlap_width:
-                    # 在重叠区域使用渐变权重
-                    alpha = (x - x_offset) / overlap_width
-                    if 0 <= y-y_offset < h2 and 0 <= x-x_offset < w2:
-                        result[y,x] = (1-alpha) * result[y,x] + alpha * img2[y-y_offset,x-x_offset]
-                else:
-                    if 0 <= y-y_offset < h2 and 0 <= x-x_offset < w2:
-                        result[y,x] = img2[y-y_offset,x-x_offset]
+                if 0 <= y-y_offset < h2 and 0 <= x-x_offset < w2:
+                    result[y,x] = img2[y-y_offset,x-x_offset]
+        
+        # 裁剪黑边
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+            result = result[y:y+h, x:x+w]
         
         return result
 
@@ -311,6 +311,8 @@ class ImageStitcher:
             
             # 创建全景图
             result = self.create_panorama(result, images[i], H)
+            # 保存中间结果
+            cv2.imwrite(f'intermediate_result_{i}.jpg', result)
             print(f"成功拼接图片 {i}")
         
         return result
