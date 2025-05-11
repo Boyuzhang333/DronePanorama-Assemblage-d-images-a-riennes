@@ -103,7 +103,7 @@ class ImageStitcher:
         
         return enhanced
 
-    def find_and_match_features(self, img1: np.ndarray, img2: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List]:
+    def find_and_match_features(self, img1: np.ndarray, img2: np.ndarray, threshold: float = 0.7) -> List[cv2.DMatch]:
         """查找和匹配两张图片之间的特征点"""
         
         # 检测特征点和描述符
@@ -112,13 +112,13 @@ class ImageStitcher:
             kp2, des2 = self.sift.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
-                return None, None, []
+                return []
             
             matches = self.flann.knnMatch(des1, des2, k=2)
             good_matches = []
             
             for m, n in matches:
-                if m.distance < 0.7 * n.distance:
+                if m.distance < threshold * n.distance:
                     good_matches.append(m)
             
             print(f"SIFT检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
@@ -129,7 +129,7 @@ class ImageStitcher:
             kp2, des2 = self.orb.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
-                return None, None, []
+                return []
             
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
@@ -143,7 +143,7 @@ class ImageStitcher:
             kp2, des2 = self.akaze.detectAndCompute(img2, None)
             
             if des1 is None or des2 is None:
-                return None, None, []
+                return []
             
             matches = self.bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
@@ -152,70 +152,94 @@ class ImageStitcher:
             print(f"AKAZE检测到特征点: 图片1={len(kp1)}, 图片2={len(kp2)}")
             print(f"AKAZE匹配点数量: {len(good_matches)}")
 
-        if len(good_matches) < 10:
+        if len(good_matches) < 4:
             print("匹配点数量不足")
-            return None, None, []
+            return []
 
-        # 获取匹配点的坐标
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        
-        return src_pts, dst_pts, good_matches
+        return good_matches
 
-    def compute_homography(self, src_pts: np.ndarray, dst_pts: np.ndarray) -> Optional[np.ndarray]:
+    def compute_homography(self, matches: List[cv2.DMatch], kp1, kp2) -> Optional[np.ndarray]:
         """计算单应性矩阵"""
-        if src_pts is None or dst_pts is None:
+        if not matches:
             return None
             
+        # 从关键点中获取匹配点的坐标
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 2)
+        
+        # 使用RANSAC方法计算单应性矩阵
         H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
         return H if H is not None else None
 
     def color_transfer(self, source: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """将源图像的颜色特征转移到目标图像"""
-        # 转换到LAB色彩空间
+        """
+        将目标图像的颜色风格转换为源图像的风格
+        """
+        # 转换到 L*a*b* 色彩空间
         source_lab = cv2.cvtColor(source, cv2.COLOR_BGR2LAB).astype(np.float32)
         target_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB).astype(np.float32)
 
         # 分别计算均值和标准差
-        source_mean = np.mean(source_lab, axis=(0, 1))
-        target_mean = np.mean(target_lab, axis=(0, 1))
-        source_std = np.std(source_lab, axis=(0, 1))
-        target_std = np.std(target_lab, axis=(0, 1))
-
-        # 调整目标图像
-        target_lab = (target_lab - target_mean) * (source_std / target_std) + source_mean
-
-        # 确保值在有效范围内
+        source_mean, source_std = [], []
+        target_mean, target_std = [], []
+        
+        for i in range(3):
+            source_mean.append(np.mean(source_lab[:,:,i]))
+            source_std.append(np.std(source_lab[:,:,i]))
+            target_mean.append(np.mean(target_lab[:,:,i]))
+            target_std.append(np.std(target_lab[:,:,i]))
+        
+        # 对每个通道进行颜色转换
+        for i in range(3):
+            target_lab[:,:,i] = ((target_lab[:,:,i] - target_mean[i]) * 
+                                (source_std[i] / target_std[i])) + source_mean[i]
+        
+        # 确保值在合理范围内
         target_lab = np.clip(target_lab, 0, 255)
-
+        
         # 转换回BGR
         result = cv2.cvtColor(target_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
         return result
 
-    def multi_band_blend(self, img1: np.ndarray, img2: np.ndarray, mask: np.ndarray, num_levels: int = 4) -> np.ndarray:
-        """多频段融合"""
+    def multi_band_blend(self, img1: np.ndarray, img2: np.ndarray, mask: np.ndarray, 
+                        num_levels: int = 4) -> np.ndarray:
+        """
+        多频段图像融合
+        """
         # 创建高斯金字塔
         img1_pyr = [img1.astype(np.float32)]
         img2_pyr = [img2.astype(np.float32)]
         mask_pyr = [mask.astype(np.float32)]
         
-        for _ in range(num_levels):
+        for i in range(num_levels - 1):
             img1_pyr.append(cv2.pyrDown(img1_pyr[-1]))
             img2_pyr.append(cv2.pyrDown(img2_pyr[-1]))
             mask_pyr.append(cv2.pyrDown(mask_pyr[-1]))
         
-        # 在最低分辨率层进行融合
-        result_pyr = [img1_pyr[-1] * mask_pyr[-1] + img2_pyr[-1] * (1 - mask_pyr[-1])]
+        # 创建拉普拉斯金字塔
+        lap1_pyr = [img1_pyr[num_levels-1]]
+        lap2_pyr = [img2_pyr[num_levels-1]]
         
-        # 逐层向上融合
-        for i in range(num_levels-1, -1, -1):
-            size = (img1_pyr[i].shape[1], img1_pyr[i].shape[0])
-            up_sampled = cv2.pyrUp(result_pyr[0], dstsize=size)
-            result_pyr.insert(0, img1_pyr[i] * mask_pyr[i] + 
-                               img2_pyr[i] * (1 - mask_pyr[i]) +
-                               up_sampled)
+        for i in range(num_levels-1, 0, -1):
+            size = (img1_pyr[i-1].shape[1], img1_pyr[i-1].shape[0])
+            expanded = cv2.pyrUp(img1_pyr[i], dstsize=size)
+            lap1_pyr.append(img1_pyr[i-1] - expanded)
+            expanded = cv2.pyrUp(img2_pyr[i], dstsize=size)
+            lap2_pyr.append(img2_pyr[i-1] - expanded)
         
-        return np.clip(result_pyr[0], 0, 255).astype(np.uint8)
+        # 融合金字塔
+        blend_pyr = []
+        for i in range(num_levels):
+            blend = lap1_pyr[i] * mask_pyr[i] + lap2_pyr[i] * (1 - mask_pyr[i])
+            blend_pyr.append(blend)
+        
+        # 重建图像
+        result = blend_pyr[0]
+        for i in range(1, num_levels):
+            size = (blend_pyr[i].shape[1], blend_pyr[i].shape[0])
+            result = cv2.pyrUp(result, dstsize=size) + blend_pyr[i]
+        
+        return np.clip(result, 0, 255).astype(np.uint8)
 
     def create_panorama(self, img1: np.ndarray, img2: np.ndarray, H: np.ndarray) -> np.ndarray:
         """创建全景图"""
@@ -283,37 +307,44 @@ class ImageStitcher:
         
         return image
 
-    def stitch_images(self, images: List[np.ndarray]) -> Optional[np.ndarray]:
-        """拼接多张图片"""
-        if not images:
-            return None
+    def stitch_images(self, images: List[np.ndarray]) -> np.ndarray:
+        """
+        简化的图像拼接方法，保持原图效果
+        """
+        if len(images) < 2:
+            return images[0] if images else None
         
-        # 从第一张图片开始
         result = images[0]
         
-        # 逐个拼接后续图片
         for i in range(1, len(images)):
-            print(f"\n处理图片对 {i}/{len(images)-1}")
+            # 检测特征点和描述符
+            if self.detector_type == 'sift':
+                kp1, des1 = self.sift.detectAndCompute(result, None)
+                kp2, des2 = self.sift.detectAndCompute(images[i], None)
+                
+                if des1 is None or des2 is None:
+                    continue
+                    
+                # 特征匹配
+                matches = self.flann.knnMatch(des1, des2, k=2)
+                good_matches = []
+                for m, n in matches:
+                    if m.distance < 0.8 * n.distance:
+                        good_matches.append(m)
+            else:
+                # 对于其他检测器的处理保持不变
+                good_matches = self.find_and_match_features(result, images[i], threshold=0.8)
             
-            # 查找和匹配特征点
-            src_pts, dst_pts, matches = self.find_and_match_features(result, images[i])
-            
-            if src_pts is None or len(matches) < 10:
-                print(f"图片 {i} 匹配点不足，跳过...")
+            if len(good_matches) < 4:
                 continue
             
-            # 计算单应性矩阵
-            H = self.compute_homography(src_pts, dst_pts)
-            
+            # 计算变换矩阵
+            H = self.compute_homography(good_matches, kp1, kp2)
             if H is None:
-                print(f"无法计算图片 {i} 的单应性矩阵，跳过...")
                 continue
             
             # 创建全景图
             result = self.create_panorama(result, images[i], H)
-            # 保存中间结果
-            cv2.imwrite(f'intermediate_result_{i}.jpg', result)
-            print(f"成功拼接图片 {i}")
         
         return result
 
